@@ -173,6 +173,7 @@ class SimpleXLSX {
 	private $datasec;
 	private $sharedstrings;
 
+    private $definedNames = array();
 	/*
 		private $date_formats = array(
 			0xe => "d/m/Y",
@@ -506,6 +507,9 @@ class SimpleXLSX {
 				}
 			}
 		}
+
+        $this->resolveDefinedNames();
+
 		if ( count( $this->sheets ) ) {
 			// Sort sheets
 			ksort( $this->sheets );
@@ -515,6 +519,109 @@ class SimpleXLSX {
 
 		return false;
 	}
+
+    /**
+     * Traces all definedNames and stores them into a private class variable
+     * @param SimpleXMLElement $entry_xmlobj
+     */
+    private function traceDefinedNames( SimpleXMLElement $entry_xmlobj ){
+        if(isset($entry_xmlobj->definedNames->definedName)){
+            foreach($entry_xmlobj->definedNames->definedName as $a => $b) {
+                if(isset($b->attributes()['name'])){
+                    $cell_aliasname = (string) $b->attributes()['name'];
+                    $aliasname_target_str = (string) $b[0];
+                    $this->definedNames[$cell_aliasname] = $aliasname_target_str;
+                }
+            }
+        }
+    }
+
+    /**
+     * This process should run, as soon as the parser has finished but before any access or calls arrive
+     * It takes the raw links and resolves the code into sheet and cell coordinates for user access.
+     */
+    private function resolveDefinedNames(){
+        if($this->definedNames){
+            $sheetnames = $this->sheetNames();
+            $sheetindices = array_flip($sheetnames);
+            foreach($this->definedNames as $alias => $qualified_target){
+                $target_collection = [];
+                foreach(explode(',',$qualified_target) as $target){
+                    list($sheetname,$cell) = explode("!",$target);
+                    $cell = str_replace('$','',$cell);
+                    if( ( $sheetname[0] == '"' || $sheetname[0] == "'" ) && ( $sheetname[0] == substr($sheetname,-1) ) ){
+                        $sheetname = substr($sheetname,1,-1);
+                    }
+
+                    if(strpos($cell,':') !== false){
+                        list($cell_start,$cell_end) = explode(':',$cell);
+                        $cell_start_y = (int) filter_var($cell_start, FILTER_SANITIZE_NUMBER_INT);
+                        $cell_end_y = (int) filter_var($cell_end, FILTER_SANITIZE_NUMBER_INT);
+                        $cell_start_x = str_replace($cell_start_y,'',$cell_start);
+                        $cell_end_x = str_replace($cell_end_y,'',$cell_end);
+                        $cell_set = [];
+                        for($y = $cell_start_y;$y <= $cell_end_y;$y++){
+                            for($x = $cell_start_x;$x <= $cell_end_x;$x++){
+                                $cell_set[]  = $x.$y;
+                            }
+                        }
+                    } else {
+                        $cell_set = [$cell];
+                    }
+
+                    foreach($cell_set as $cell){
+                        if(isset($sheetindices[trim($sheetname)])){
+                            $t = new stdClass();
+                            $t->sheetindex = $sheetindex = $sheetindices[trim($sheetname)];
+                            $t->cell = $cell;
+                            $target_collection[] = $t;
+                        }
+                    }
+                }
+
+                $this->definedNames[$alias] = $target_collection;
+            }
+        }
+    }
+
+    /**
+     * Simple getter to access the class variable
+     * @return array
+     */
+    public function getDefinedNames() {
+        return $this->definedNames;
+    }
+
+    /**
+     * Explicitly access a cell or cell set defined by a name.
+     * Since format is optional and access should be as natural as possible, format may also take the implode char.
+     *
+     * ->getCellByAlias('name') returns an array containing all result cell values.
+     * ->getCellByAlias('name', ';') returns a string containing all result cell values concatenated.
+     *
+     * @param string|coordinate $cell
+     * @param bool $format
+     * @param string $implode_char
+     * @return string|array
+     */
+    public function getCellByAlias($cell = 'name', $format = null, $implode_char = null)
+    {
+        if($format !== false && $format !== true && !is_null($format) && is_null($implode_char)){
+            $implode_char = $format;
+            $format = null;
+        }
+        if (isset($this->definedNames[$cell])) {
+            $result_data = [];
+            foreach ($this->definedNames[$cell] as $cell) {
+                $result_data[$cell->sheetindex . '-' . $cell->cell] = $this->getCell($cell->sheetindex, $cell->cell, $format);
+            }
+            if($implode_char){
+                return implode($implode_char,$result_data);
+            }
+            return $result_data;
+        }
+    }
+
 	/*
 	 * @param string $name Filename in archive
 	 * @return SimpleXMLElement|bool
@@ -532,6 +639,7 @@ class SimpleXLSX {
 			// XML External Entity (XXE) Prevention
 			$_old         = libxml_disable_entity_loader();
 			$entry_xmlobj = simplexml_load_string( $entry_xml );
+            $this->traceDefinedNames($entry_xmlobj);
 //			echo '<pre>'.print_r( $entry_xmlobj, true).'</pre>';
 			libxml_disable_entity_loader($_old);
 			if ( $entry_xmlobj ) {
